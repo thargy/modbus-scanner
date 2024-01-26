@@ -94,7 +94,7 @@ def device_id(value):
     return id
 
 
-def device_ids(value):
+def deviceIds(value):
     '''The function `device_ids` takes a string input and returns a list of device IDs, where the input can
     be a single ID or a range of IDs separated by commas.
 
@@ -136,6 +136,30 @@ def device_ids(value):
 
     return sorted(set(ids))
 
+def isInverter(request, response):
+    '''The function `isInverter` checks if the `response` represents an inverter.
+    
+    Parameters
+    ----------
+    request
+        The `request` parameter is a list of bytes that represents the TCP request. It includes the transcation ID
+        and the device ID.
+    response
+        The response parameter is a list of bytes that represents the response received.
+    
+    Returns
+    -------
+        a boolean value indicating whether the response represents an inverter.
+    
+    '''
+    # This is a simplified check using only the first 9 registers
+    # requesting the full 69 registers can actually result in a split response on occassion. 
+    expected = [request[0], request[1],
+               0x00, 0x00, 0x00, 0x15, 
+               request[6],
+               0x03, 0x12, 0x53, 0x75, 0x6e, 0x53, 0x00, 0x01, 0x00, 0x41, 0x53, 0x6f, 0x6c, 0x61, 0x72, 0x45, 0x64, 0x67, 0x65, 0x20]
+    return list(response) == expected
+
 
 # Support console colors
 colorama_init()
@@ -144,10 +168,10 @@ colorama_init()
 parser = argparse.ArgumentParser(
     description='Performs a scan of TCP Modbus looking for device IDs.')
 
-parser.add_argument('ip-address', type=ip_address,
+parser.add_argument('ipAddress', type=ip_address,
                     help="The Modbus server to query.")
 parser.add_argument('--version', action='version', version='%(prog)s 0.1')
-parser.add_argument('-d', '--device-ids', type=device_ids, metavar="N", required=False,
+parser.add_argument('-d', '--deviceIds', type=deviceIds, metavar="N", required=False,
                     help='The device ids to scan, can be comma-separated integers, or hypenated range, e.g. 1,2,4-7,10. Default is 1-247.', default="1-247")
 parser.add_argument('-p', '--port', type=port, required=False,
                     metavar="P", help='The port number (1024-49151) of TCP Modbus. Default is 1502.', default=1502)
@@ -155,38 +179,47 @@ parser.add_argument('-t', '--timeout', type=timeout, required=False,
                     metavar="T", help='The timeout in seconds. Default is 3.0.', default=3.0)
 parser.add_argument('-r', '--retries', type=retries, metavar="N", required=False,
                     help='The number of retries on a communication failure. Default is 3.', default=3)
+parser.add_argument('-x', '--maxHex', type=int, metavar="N", required=False,
+                    help='The maximum length of response hex dump. Use <= 0 to not dump response. Default is -1.', default=-1)
 
 args = parser.parse_args()
 
-h = str(getattr(args, 'ip-address'))
-p = args.port
-t = args.timeout
-r = args.retries
-d = args.device_ids
-maxHex = 200
+HOST = str(args.ipAddress)
+PORT = args.port
+TIMEOUT = args.timeout
+RETRIES = args.retries
+IDS = args.deviceIds
+MAXHEX = args.maxHex
 
 #
 # Settings
 #
-data = [0x0, 0x1, 0x0, 0x0, 0x0, 0x6, 0x0, 0x3, 0x9c, 0x40, 0x0, 0x45]
+transaction = 0
+request = [0x0, 0x0, 0x0, 0x0, 0x0, 0x6, 0x0, 0x3, 0x9c, 0x40, 0x0, 0x09]
 device_id_index = 6
 connected = False
+inverters = 0
 
 #
 # Perform scan
 #
-for device_id in d:
-    # Update device_id
-    data[device_id_index] = device_id
+for device_id in IDS:
+    # Update transaction count
+    transaction = transaction + 1
+    
+    # Update request
+    request[0] = int(transaction / 256)
+    request[1] = transaction % 256
+    request[device_id_index] = device_id
+        
     attempt = 1
-
-    while not connected and attempt <= r:
+    while not connected and attempt <= RETRIES:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             # Connect to
-            print(f"Connecting to {h}:{p} ... ", end= "")
-            sock.settimeout(t)
-            sock.connect((h, p))
+            print(f"Connecting to {HOST}:{PORT} ... ", end= "")
+            sock.settimeout(TIMEOUT)
+            sock.connect((HOST, PORT))
             connected = True  
             print(f"{Fore.GREEN}SUCCEEDED{Fore.RESET}")
         except socket.error as e:            
@@ -195,34 +228,45 @@ for device_id in d:
             attempt = attempt + 1
             sleep(1.0)  
 
-    if (attempt > r):
+    if (attempt > RETRIES):
         print(f"{Fore.RED}Aborting due to {attempt-1} connection attempt failures! {Fore.RESET}")
         sys.exit(1)
     
-    while (attempt <= r):
+    while (attempt <= RETRIES):
         try:
             # Create a socket (SOCK_STREAM means a TCP socket)
                 sock.setblocking(0)
-                sock.sendall(bytes(data))
-                print("Scanning ID: {} ... ". format(device_id), end='')
+                sock.sendall(bytes(request))
+                print("Scanning ID: {} ...". format(device_id), end='')
 
                 # Receive data from the server and shut down
-                ready = select.select([sock], [], [], t)
+                ready = select.select([sock], [], [], TIMEOUT)
 
                 if ready[0]:
-                    received = sock.recv(1024)
+                    response = sock.recv(1024)
+                    
+                    if (isInverter(request, response)):
+                        print(f" {Fore.GREEN}INVERTER{Fore.RESET}", end='')
+                    else:
+                        print(f" {Fore.YELLOW}Unknown Device{Fore.RESET}", end='')
 
-                    print(f"{Fore.GREEN}Received{Fore.RESET} ({len(received)} bytes): { ' '.join(format(x, '02x') for x in received[:maxHex]) }{'...' if len(received) > maxHex else ''}")
+                    print(f" Received ({len(response)} bytes)", end='')
+                    
+                    if (MAXHEX > 0):
+                        print(f": { ' '.join(format(x, '02x') for x in response[:MAXHEX]) }{'...' if len(response) > MAXHEX else ''}")
+                    else:
+                        print()
+                        
                 else:
-                    print(f"{Fore.RED}Timedout{Fore.RESET}")
+                    print(f" {Fore.RED}Timedout{Fore.RESET}")
                 break
 
         except socket.error as e:
             print()
-            print(f"{Fore.RED}FAILED{Fore.RESET}: {e}")
+            print(f" {Fore.RED}FAILED{Fore.RESET}: {e}")
             attempt = attempt + 1
 
-    if (attempt > r):
+    if (attempt > RETRIES):
         print(f"{Fore.RED}Aborting scanning device ID {device_id} after {attempt-1} attempts! {Fore.RESET}")
         break
     
