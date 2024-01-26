@@ -4,7 +4,6 @@ from time import sleep as sleep
 import socket
 import sys
 import argparse
-import itertools
 from colorama import init as colorama_init
 from colorama import Fore
 from colorama import Style
@@ -21,6 +20,24 @@ TRANS_LOW_INDEX = 1
 FOUND = 1
 FOUND_INV = 2
 
+def batch(iterable, n=1):
+    '''The `batch` function takes an iterable and returns a generator that yields batches of elements from
+    the iterable.
+    
+    Parameters
+    ----------
+    iterable
+        The `iterable` parameter is any sequence or collection that can be iterated over, such as a list,
+    tuple, or string. It is the input data that you want to process in batches.
+    n, optional
+        The parameter `n` in the `batch` function is an optional parameter that specifies the size of each
+    batch. By default, it is set to 1, which means each batch will contain only one element from the
+    iterable.
+    
+    '''
+    l = len(iterable)
+    for ndx in range(0, l, n):
+        yield iterable[ndx:min(ndx + n, l)]
 
 def port(value):
     '''The function `port` takes a value as input and returns it as an integer if it is between 1024 and
@@ -241,8 +258,7 @@ def scanId(device_id, timeout):
             sleep(1.0)
 
     if (attempt > RETRIES):
-        print(f"{Fore.RED}Aborting due to {
-              attempt-1} connection attempt failures! {Fore.RESET}")
+        print(f"{Fore.RED}Aborting due to {attempt-1} connection attempt failures! {Fore.RESET}")
         sys.exit(1)
 
     while (attempt <= RETRIES):
@@ -268,8 +284,7 @@ def scanId(device_id, timeout):
                 print(f" Received ({len(response)} bytes)", end='')
 
                 if (MAXHEX > 0):
-                    print(f": {' '.join(format(x, '02x') for x in response[:MAXHEX])}{
-                          '...' if len(response) > MAXHEX else ''}")
+                    print(f": {' '.join(format(x, '02x') for x in response[:MAXHEX])}{'...' if len(response) > MAXHEX else ''}")
                 else:
                     print()
 
@@ -285,8 +300,7 @@ def scanId(device_id, timeout):
             attempt = attempt + 1
 
     if (attempt > RETRIES):
-        print(f"{Fore.RED}Aborted scanning after {
-              attempt-1} attempts! {Fore.RESET}")
+        print(f"{Fore.RED}Aborted scanning after {attempt-1} attempts! {Fore.RESET}")
         sys.exit(1)
 
     return result
@@ -340,7 +354,7 @@ chunkSize = int(1.5*COUNT) if COUNT > 0 else 4
 #
 # Perform scan in chunks
 #
-for chunk in itertools.batched(IDS, chunkSize):
+for chunk in batch(IDS, chunkSize):
     retry = []
     # Quick scan chunk
     for device_id in chunk:
