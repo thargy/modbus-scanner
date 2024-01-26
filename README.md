@@ -1,6 +1,8 @@
 # Modbus Scanner
 
-This is a prototype repository to attempt to create a fast scan of the modbus for devices, in python.
+This is a prototype repository to attempt to create a fast scan of the modbus for SolarEdge inverters, in python.
+
+It does so by chunking the device ID range and scanning quickly, then slowly each chunk in turn.
 
 ## Usage
 
@@ -20,5 +22,3 @@ py scan.py 192.0.0.10 2
 py scan.py 192.0.0.10 -d 1,5,6-9 -x 20
 
 ```
-
-The port number defaults to `1502`.

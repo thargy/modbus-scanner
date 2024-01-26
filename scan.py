@@ -4,9 +4,22 @@ from time import sleep as sleep
 import socket
 import sys
 import argparse
+import itertools
 from colorama import init as colorama_init
 from colorama import Fore
 from colorama import Style
+
+#
+# Constants
+#
+REQUEST = [0x0, 0x0, 0x0, 0x0, 0x0, 0x6, 0x0, 0x3, 0x9c, 0x40, 0x0, 0x09]
+RESPONSE = [0x0, 0x0, 0x0, 0x0, 0x0, 0x15, 0x0, 0x3, 0x12, 0x53, 0x75, 0x6e, 0x53,
+            0x0, 0x1, 0x0, 0x41, 0x53, 0x6f, 0x6c, 0x61, 0x72, 0x45, 0x64, 0x67, 0x65, 0x20]
+DEVICE_ID_INDEX = 6
+TRANS_HIGH_INDEX = 0
+TRANS_LOW_INDEX = 1
+FOUND = 1
+FOUND_INV = 2
 
 
 def port(value):
@@ -136,29 +149,147 @@ def deviceIds(value):
 
     return sorted(set(ids))
 
+
 def isInverter(request, response):
-    '''The function `isInverter` checks if the `response` represents an inverter.
-    
+    '''The function `isInverter` checks if a given response matches the expected response for an inverter
+    device.
+
     Parameters
     ----------
     request
-        The `request` parameter is a list of bytes that represents the TCP request. It includes the transcation ID
-        and the device ID.
+        The request parameter is a list that contains the TCP request.
     response
-        The response parameter is a list of bytes that represents the response received.
-    
+        The `response` parameter is a list of values that represents the response received from a device.
+
     Returns
     -------
-        a boolean value indicating whether the response represents an inverter.
-    
+        The function `isInverter` returns the result of the scanning process, which can be one of the following
+    values:
+    - `FOUND_INV`: Indicates that an inverter was found.
+    - `FOUND`: Indicates that a non-inverter device was found.
+    - `0`: Indicates an unknown response or no response was received within the specified timeout.
+
     '''
-    # This is a simplified check using only the first 9 registers
-    # requesting the full 69 registers can actually result in a split response on occassion. 
-    expected = [request[0], request[1],
-               0x00, 0x00, 0x00, 0x15, 
-               request[6],
-               0x03, 0x12, 0x53, 0x75, 0x6e, 0x53, 0x00, 0x01, 0x00, 0x41, 0x53, 0x6f, 0x6c, 0x61, 0x72, 0x45, 0x64, 0x67, 0x65, 0x20]
-    return list(response) == expected
+    if (len(response) < 7 or len(request) < DEVICE_ID_INDEX):
+        return 0
+
+    expected = RESPONSE.copy()
+    expected[TRANS_HIGH_INDEX] = request[0]
+    expected[TRANS_LOW_INDEX] = request[1]
+    expected[DEVICE_ID_INDEX] = request[DEVICE_ID_INDEX]
+
+    index = 0
+    for a in response:
+        if (index >= len(expected)):
+            return FOUND if index >= 7 else 0
+        if a != expected[index]:
+            return 0
+        index = index + 1
+
+    return FOUND_INV
+
+
+sock = None
+transaction = 0
+
+
+def scanId(device_id, timeout):
+    '''The `scanId` function scans a device ID by sending a request to a server and receiving a response,
+    and returns the result of the scan.
+
+    Parameters
+    ----------
+    device_id
+        The `device_id` parameter is the ID of the device that you want to scan. It is used to update the
+    request and specify the device ID in the request packet.
+    timeout
+        The `timeout` parameter is the maximum amount of time (in seconds) to wait for a response from the
+    server before considering it as a timeout.
+
+    Returns
+    -------
+        The function `scanId` returns the result of the scanning process, which can be one of the following
+    values:
+    - `FOUND_INV`: Indicates that an inverter was found.
+    - `FOUND`: Indicates that a non-inverter device was found.
+    - `0`: Indicates an unknown response or no response was received within the specified timeout.
+
+    '''
+    global sock, transaction
+
+    # Update request
+    transaction = transaction + 1
+    request = REQUEST.copy()
+    request[TRANS_HIGH_INDEX] = int(transaction / 256)
+    request[TRANS_LOW_INDEX] = transaction % 256
+    request[DEVICE_ID_INDEX] = device_id
+
+    attempt = 1
+    result = 0
+    while sock is None and attempt <= RETRIES:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            # Connect to
+            print(f"Connecting to {HOST}:{PORT} ... ", end="")
+            sock.settimeout(CONNTIMEOUT)
+            sock.connect((HOST, PORT))
+            print(f"{Fore.GREEN}SUCCEEDED{Fore.RESET}")
+        except socket.error as e:
+            sock = None
+            print(f"{Fore.RED}FAILED{Fore.RESET} {e}")
+            attempt = attempt + 1
+            sleep(1.0)
+
+    if (attempt > RETRIES):
+        print(f"{Fore.RED}Aborting due to {
+              attempt-1} connection attempt failures! {Fore.RESET}")
+        sys.exit(1)
+
+    while (attempt <= RETRIES):
+        try:
+            # Create a socket (SOCK_STREAM means a TCP socket)
+            sock.setblocking(0)
+            sock.sendall(bytes(request))
+            print("Scanning ID: {} ...". format(device_id), end='')
+
+            # Receive data from the server and shut down
+            ready = select.select([sock], [], [], timeout)
+
+            if ready[0]:
+                response = sock.recv(1024)
+                result = isInverter(request, response)
+                if (result == FOUND_INV):
+                    print(f" {Fore.GREEN}INVERTER{Fore.RESET}", end='')
+                elif (result == FOUND):
+                    print(f" {Fore.YELLOW}Non-inverter{Fore.RESET}", end='')
+                else:
+                    print(f" {Fore.RED}Unknown Response{Fore.RESET}", end='')
+
+                print(f" Received ({len(response)} bytes)", end='')
+
+                if (MAXHEX > 0):
+                    print(f": {' '.join(format(x, '02x') for x in response[:MAXHEX])}{
+                          '...' if len(response) > MAXHEX else ''}")
+                else:
+                    print()
+
+                return result
+
+            else:
+                print(f" {Fore.RED}Timedout{Fore.RESET} after {timeout}s")
+            break
+
+        except socket.error as e:
+            print()
+            print(f" {Fore.RED}FAILED{Fore.RESET}: {e}")
+            attempt = attempt + 1
+
+    if (attempt > RETRIES):
+        print(f"{Fore.RED}Aborted scanning after {
+              attempt-1} attempts! {Fore.RESET}")
+        sys.exit(1)
+
+    return result
 
 
 # Support console colors
@@ -177,8 +308,12 @@ parser.add_argument('-d', '--deviceIds', type=deviceIds, metavar="N", required=F
                     help='The device ids to scan, can be comma-separated integers, or hypenated range, e.g. 1,2,4-7,10. Default is 1-247.', default="1-247")
 parser.add_argument('-p', '--port', type=port, required=False,
                     metavar="P", help='The port number (1024-49151) of TCP Modbus. Default is 1502.', default=1502)
+parser.add_argument('-c', '--connectionTimeout', type=timeout, required=False,
+                    metavar="T", help='The connection timeout in seconds. Default is 5.0.', default=5.0)
+parser.add_argument('-f', '--fastTimeout', type=timeout, required=False,
+                    metavar="T", help='The fast timeout in seconds. Default is 0.5.', default=0.5)
 parser.add_argument('-t', '--timeout', type=timeout, required=False,
-                    metavar="T", help='The timeout in seconds. Default is 3.0.', default=3.0)
+                    metavar="T", help='The long timeout in seconds. Default is 3.0.', default=3.0)
 parser.add_argument('-r', '--retries', type=retries, metavar="N", required=False,
                     help='The number of retries on a communication failure. Default is 3.', default=3)
 parser.add_argument('-x', '--maxHex', type=int, metavar="N", required=False,
@@ -189,7 +324,9 @@ args = parser.parse_args()
 HOST = str(args.ipAddress)
 COUNT = args.count
 PORT = args.port
-TIMEOUT = args.timeout
+FAST = args.fastTimeout
+SLOW = args.timeout
+CONNTIMEOUT = args.connectionTimeout
 RETRIES = args.retries
 IDS = args.deviceIds
 MAXHEX = args.maxHex
@@ -197,98 +334,48 @@ MAXHEX = args.maxHex
 #
 # Settings
 #
-transaction = 0
-request = [0x0, 0x0, 0x0, 0x0, 0x0, 0x6, 0x0, 0x3, 0x9c, 0x40, 0x0, 0x09]
-device_id_index = 6
-connected = False
 inverters = 0
+chunkSize = int(1.5*COUNT) if COUNT > 0 else 4
 
 #
-# Perform scan
+# Perform scan in chunks
 #
-for device_id in IDS:
-    # Update transaction count
-    transaction = transaction + 1
-    
-    # Update request
-    request[0] = int(transaction / 256)
-    request[1] = transaction % 256
-    request[device_id_index] = device_id
-        
-    attempt = 1
-    while not connected and attempt <= RETRIES:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            # Connect to
-            print(f"Connecting to {HOST}:{PORT} ... ", end= "")
-            sock.settimeout(TIMEOUT)
-            sock.connect((HOST, PORT))
-            connected = True  
-            print(f"{Fore.GREEN}SUCCEEDED{Fore.RESET}")
-        except socket.error as e:            
-            print(f"{Fore.RED}FAILED{Fore.RESET} {e}")
-            connected = False
-            attempt = attempt + 1
-            sleep(1.0)  
+for chunk in itertools.batched(IDS, chunkSize):
+    retry = []
+    # Quick scan chunk
+    for device_id in chunk:
+        result = scanId(device_id, FAST)
+        if (result == FOUND_INV):
+            inverters = inverters + 1
+        elif (result != FOUND):
+            retry.append(device_id)
 
-    if (attempt > RETRIES):
-        print(f"{Fore.RED}Aborting due to {attempt-1} connection attempt failures! {Fore.RESET}")
-        sys.exit(1)
-    
-    while (attempt <= RETRIES):
-        try:
-            # Create a socket (SOCK_STREAM means a TCP socket)
-                sock.setblocking(0)
-                sock.sendall(bytes(request))
-                print("Scanning ID: {} ...". format(device_id), end='')
+        if (COUNT > 0 and inverters >= COUNT):
+            print(f"{Fore.GREEN}Found all {inverters} inverters! {Fore.RESET}")
+            sys.exit(0)
 
-                # Receive data from the server and shut down
-                ready = select.select([sock], [], [], TIMEOUT)
+    # Slow scan chunk
+    for device_id in retry:
+        result = scanId(device_id, SLOW)
+        if (result == FOUND_INV):
+            inverters = inverters + 1
 
-                if ready[0]:
-                    response = sock.recv(1024)
-                    
-                    if (isInverter(request, response)):
-                        print(f" {Fore.GREEN}INVERTER{Fore.RESET}", end='')
-                        inverters=inverters+1
-                    else:
-                        print(f" {Fore.YELLOW}Unknown Device{Fore.RESET}", end='')
+        if (COUNT > 0 and inverters >= COUNT):
+            print(f"{Fore.GREEN}Found all {inverters} inverters! {Fore.RESET}")
+            sys.exit(0)
 
-                    print(f" Received ({len(response)} bytes)", end='')
-                    
-                    if (MAXHEX > 0):
-                        print(f": { ' '.join(format(x, '02x') for x in response[:MAXHEX]) }{'...' if len(response) > MAXHEX else ''}")
-                    else:
-                        print()
-                        
-                else:
-                    print(f" {Fore.RED}Timedout{Fore.RESET}")
-                break
 
-        except socket.error as e:
-            print()
-            print(f" {Fore.RED}FAILED{Fore.RESET}: {e}")
-            attempt = attempt + 1
-            
-    if (COUNT > 0 and inverters >= COUNT):
-        print(f"{Fore.GREEN}Found all {inverters} inverters! {Fore.RESET}")
-        break
-
-    if (attempt > RETRIES):
-        print(f"{Fore.RED}Aborting scanning device ID {device_id} after {attempt-1} attempts! {Fore.RESET}")
-        break
-    
-# Sanity check
-if (connected):
+# Ensure we close the socket
+if sock is not None:
     try:
         # Connect to
-        print(f"Closing connection ... ", end= "")
+        print(f"Closing connection ... ", end="")
         sock.close()
         print(f"{Fore.GREEN}SUCCEEDED{Fore.RESET}")
-    except socket.error as e:            
+    except socket.error as e:
         print(f"{Fore.RED}FAILED{Fore.RESET} {e}")
     finally:
         connected = False
 
 print()
-print("DONE!")
+print(f"Finished scan! Found {inverters} inverters.")
