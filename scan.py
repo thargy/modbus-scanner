@@ -170,6 +170,8 @@ parser = argparse.ArgumentParser(
 
 parser.add_argument('ipAddress', type=ip_address,
                     help="The Modbus server to query.")
+parser.add_argument('count', type=int, nargs='?',
+                    help="The number of inverters to find. Use <=0 to scan fully. Defaults to -1", default=-1)
 parser.add_argument('--version', action='version', version='%(prog)s 0.1')
 parser.add_argument('-d', '--deviceIds', type=deviceIds, metavar="N", required=False,
                     help='The device ids to scan, can be comma-separated integers, or hypenated range, e.g. 1,2,4-7,10. Default is 1-247.', default="1-247")
@@ -185,6 +187,7 @@ parser.add_argument('-x', '--maxHex', type=int, metavar="N", required=False,
 args = parser.parse_args()
 
 HOST = str(args.ipAddress)
+COUNT = args.count
 PORT = args.port
 TIMEOUT = args.timeout
 RETRIES = args.retries
@@ -247,6 +250,7 @@ for device_id in IDS:
                     
                     if (isInverter(request, response)):
                         print(f" {Fore.GREEN}INVERTER{Fore.RESET}", end='')
+                        inverters=inverters+1
                     else:
                         print(f" {Fore.YELLOW}Unknown Device{Fore.RESET}", end='')
 
@@ -265,6 +269,10 @@ for device_id in IDS:
             print()
             print(f" {Fore.RED}FAILED{Fore.RESET}: {e}")
             attempt = attempt + 1
+            
+    if (COUNT > 0 and inverters >= COUNT):
+        print(f"{Fore.GREEN}Found all {inverters} inverters! {Fore.RESET}")
+        break
 
     if (attempt > RETRIES):
         print(f"{Fore.RED}Aborting scanning device ID {device_id} after {attempt-1} attempts! {Fore.RESET}")
